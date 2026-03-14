@@ -205,12 +205,16 @@ body {
 /* Prompt accent style (Claude) — left accent border + subtle bg */
 .turn-user.prompt-accent { border-left: 3px solid var(--accent-border, rgba(255,255,255,0.4)); padding-left: 10px; margin-left: -13px; background: rgba(255,255,255,0.03); border-radius: 0 4px 4px 0; padding-top: 4px; padding-bottom: 4px; }
 /* Bullet prefix */
-.ai-bullet { font-weight: 700; margin-right: 8px; opacity: 0.85; font-size: 11px; }
+.ai-bullet { font-weight: 700; margin-right: 8px; opacity: 0.85; font-size: 13px; line-height: 1; }
+/* Inline highlights for CLI tokens */
+.hl-cmd { opacity: 1; } /* /commands, paths — colored via JS */
+.hl-num { opacity: 1; } /* list numbers like 1. 2. */
 /* Continuation variants */
-.turn-ai.cont-none .continuation { display: block; padding-left: 20px; }
+.turn-ai.cont-none .continuation { display: block; padding-left: 0; }
 .turn-ai.cont-none .continuation::before { display: none; }
 .turn-ai.cont-indent .continuation { display: block; padding-left: 20px; }
 .turn-ai.cont-indent .continuation::before { display: none; }
+.ai-para-gap { height: 10px; }
 .turn-gap { height: 14px; }
 .cursor-blink::after { content: '\2588'; animation: blink 1.1s step-end infinite; margin-left: 2px; font-weight: 400; opacity: 0.6; }
 @keyframes blink { 0%,100% { opacity: 0.6 } 50% { opacity: 0 } }
@@ -768,6 +772,9 @@ function applyTurnColors() {
     el.style.borderLeftColor = c.prompt;
     el.style.background = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
   });
+  // Inline highlights use the prompt/accent color
+  $('termBody').querySelectorAll('.hl-cmd').forEach(el => el.style.color = c.prompt);
+  $('termBody').querySelectorAll('.hl-num').forEach(el => el.style.color = c.prompt);
   $('termBody').querySelectorAll('.cursor-blink').forEach(el => el.style.setProperty('--cursor-color', c.cursor));
 }
 
@@ -850,8 +857,27 @@ function stripUserPrompt(ln) { return ln.replace(/^[>\u203A]\s?/, ''); }
 function parse(text) {
   const lines = text.split('\n'), turns = [];
   let cur = null;
-  for (const ln of lines) {
-    if (!ln.trim()) { if (cur) { turns.push(cur); cur = null; } turns.push({type:'gap'}); }
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (!ln.trim()) {
+      // Blank line: only split turns if next non-blank line is a user prompt
+      // Otherwise treat as paragraph gap within AI response
+      if (cur?.type === 'user') { turns.push(cur); cur = null; turns.push({type:'gap'}); }
+      else if (cur?.type === 'ai') {
+        // Look ahead: if next content is a user line or another bullet, start new turn
+        let j = i + 1;
+        while (j < lines.length && !lines[j].trim()) j++;
+        const next = lines[j];
+        if (!next || isUserLine(next) || BULLET_RE.test(next)) {
+          turns.push(cur); cur = null; turns.push({type:'gap'});
+        } else {
+          // Blank within AI response — push a gap marker into the lines for spacing
+          cur.lines.push('');
+        }
+      } else {
+        turns.push({type:'gap'});
+      }
+    }
     else if (isUserLine(ln)) { if (cur) turns.push(cur); cur = {type:'user', text: stripUserPrompt(ln)}; }
     else { if (cur?.type==='ai') cur.lines.push(ln); else { if (cur) turns.push(cur); cur = {type:'ai',lines:[ln]}; }}
   }
@@ -895,13 +921,14 @@ function render() {
       const firstLine = t.lines[0] || '';
       const hasBullet = BULLET_RE.test(firstLine);
       if (ps.aiPrefix === 'bullet' && hasBullet) {
-        h += `<span class="ai-bullet">&bull;</span>`;
+        h += `<span class="ai-bullet">&#9679;</span>`;
       } else if (ps.aiPrefix === 'label') {
         h += `<span class="ai-prefix">${esc(label)}</span>`;
       }
       t.lines.forEach((l,j) => {
+        if (!l && j > 0) { h += '<div class="ai-para-gap"></div>'; return; }
         const text = j === 0 && hasBullet ? l.replace(BULLET_RE, '') : l;
-        h += j===0 ? `<span>${esc(text)}</span>` : `<span class="continuation">${esc(text)}</span>`;
+        h += j===0 ? `<span>${highlight(text)}</span>` : `<span class="continuation">${highlight(text)}</span>`;
       });
       h += '</div>';
       eLine += t.lines.length;
@@ -913,6 +940,29 @@ function render() {
 }
 
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ─── Inline Syntax Highlighting ─────────────────────────────
+// Highlights CLI tokens: /commands, `backtick code`, **bold**, paths, list numbers
+// Uses placeholder approach to avoid regex conflicts with generated HTML
+function highlight(text) {
+  const tokens = [];
+  let s = text;
+  // Phase 1: extract tokens that need special rendering (replace with placeholders)
+  // `backtick code`
+  s = s.replace(/`([^`]+)`/g, (_, inner) => { tokens.push(`<span class="hl-cmd">${esc(inner)}</span>`); return `\x00${tokens.length - 1}\x00`; });
+  // **bold**
+  s = s.replace(/\*\*([^*]+)\*\*/g, (_, inner) => { tokens.push(`<strong>${esc(inner)}</strong>`); return `\x00${tokens.length - 1}\x00`; });
+  // Now escape the remaining plain text
+  s = esc(s);
+  // Phase 2: highlight patterns in the escaped text (safe — no HTML to corrupt)
+  // /slash-commands and /paths (e.g. /ce:compound, src/digest/strategies.ts)
+  s = s.replace(/(?<![&\w])(\/?(?:[\w@.~-]+\/)+[\w@.~-]*|\/[\w:.-]+)/g, '<span class="hl-cmd">$1</span>');
+  // List numbers at line start: "1. ", "2. " etc
+  s = s.replace(/^(\s*\d+\.)\s/gm, '<span class="hl-num">$1</span> ');
+  // Phase 3: restore token placeholders
+  s = s.replace(/\x00(\d+)\x00/g, (_, i) => tokens[+i]);
+  return s;
+}
 
 function bindTurns() {
   $('termBody').querySelectorAll('.turn[data-ln]').forEach(el => {
