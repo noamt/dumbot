@@ -183,6 +183,8 @@ body {
   font-size: 13px;
   line-height: 1.75;
   font-feature-settings: 'liga' 1;
+  white-space: pre-wrap;
+  word-break: break-word;
   min-height: 40px;
   transition: color 0.3s;
 }
@@ -214,6 +216,7 @@ body {
 .turn-ai.cont-none .continuation::before { display: none; }
 .turn-ai.cont-indent .continuation { display: block; padding-left: 20px; }
 .turn-ai.cont-indent .continuation::before { display: none; }
+.ai-line { display: block; }
 .ai-para-gap { height: 10px; }
 .turn-gap { height: 14px; }
 .cursor-blink::after { content: '\2588'; animation: blink 1.1s step-end infinite; margin-left: 2px; font-weight: 400; opacity: 0.6; }
@@ -925,10 +928,17 @@ function render() {
       } else if (ps.aiPrefix === 'label') {
         h += `<span class="ai-prefix">${esc(label)}</span>`;
       }
+      const useCont = ps.continuation !== 'none';
       t.lines.forEach((l,j) => {
         if (!l && j > 0) { h += '<div class="ai-para-gap"></div>'; return; }
         const text = j === 0 && hasBullet ? l.replace(BULLET_RE, '') : l;
-        h += j===0 ? `<span>${highlight(text)}</span>` : `<span class="continuation">${highlight(text)}</span>`;
+        if (j === 0) {
+          h += `<span>${highlight(text)}</span>`;
+        } else if (useCont) {
+          h += `<span class="continuation">${highlight(text)}</span>`;
+        } else {
+          h += `<span class="ai-line">${highlight(text)}</span>`;
+        }
       });
       h += '</div>';
       eLine += t.lines.length;
@@ -959,6 +969,8 @@ function highlight(text) {
   s = s.replace(/(?<![&\w])(\/?(?:[\w@.~-]+\/)+[\w@.~-]*|\/[\w:.-]+)/g, '<span class="hl-cmd">$1</span>');
   // List numbers at line start: "1. ", "2. " etc
   s = s.replace(/^(\s*\d+\.)\s/gm, '<span class="hl-num">$1</span> ');
+  // Dash list items: "- " at line start
+  s = s.replace(/^(\s*[-–])\s/gm, '<span class="hl-num">$1</span> ');
   // Phase 3: restore token placeholders
   s = s.replace(/\x00(\d+)\x00/g, (_, i) => tokens[+i]);
   return s;
@@ -1062,6 +1074,121 @@ like a normal person.`;
 buildThemeDd();
 buildAiDd();
 applyTheme();
+
+// ─── Regression Tests ────────────────────────────────────────
+// Run with: dumbot.runTests() in the browser console
+window.dumbot = { runTests() {
+  const results = [];
+  function assert(name, condition, detail) {
+    results.push({ name, pass: !!condition, detail: detail || '' });
+    if (!condition) console.error(`FAIL: ${name}`, detail || '');
+  }
+
+  // ── Parser Tests ──────────────────────────────────────────
+
+  // P1: Recognizes > as user prompt
+  let turns = parse('> hello\nworld');
+  assert('P1: > user prompt', turns[0]?.type === 'user' && turns[0].text === 'hello');
+
+  // P2: Recognizes › (U+203A) as user prompt
+  turns = parse('\u203A hello\nworld');
+  assert('P2: \u203A user prompt', turns[0]?.type === 'user' && turns[0].text === 'hello');
+
+  // P3: Blank lines within AI response don't split turns (look-ahead)
+  turns = parse('\u25CF First line\n\n  second paragraph\n\n  third paragraph');
+  const aiTurns = turns.filter(t => t.type === 'ai');
+  assert('P3: AI paragraphs merged', aiTurns.length === 1, `got ${aiTurns.length} AI turns`);
+  assert('P3: blank lines preserved', aiTurns[0]?.lines.includes(''), 'no empty string in lines');
+
+  // P4: Blank lines DO split when next content is user prompt
+  turns = parse('\u25CF AI response\n\n> user question');
+  assert('P4: split at user prompt', turns.filter(t => t.type === 'user').length === 1);
+  assert('P4: split at user prompt (ai)', turns.filter(t => t.type === 'ai').length === 1);
+
+  // P5: Blank lines DO split when next content is new bullet
+  turns = parse('\u25CF First thought\n\n\u25CF Second thought');
+  assert('P5: split at new bullet', turns.filter(t => t.type === 'ai').length === 2);
+
+  // P6: Bullet stripped from first AI line
+  turns = parse('\u2022 Hello world');
+  assert('P6: bullet in text', BULLET_RE.test(turns[0]?.lines[0]), 'first line should still have bullet in raw parse');
+
+  // ── Highlight Tests ───────────────────────────────────────
+
+  // H1: /slash-command highlighted
+  let hl = highlight('/ce:compound is heavy');
+  assert('H1: /command highlighted', hl.includes('hl-cmd') && hl.includes('/ce:compound'));
+
+  // H2: src/path/file.ts highlighted
+  hl = highlight('Added in src/digest/strategies.ts');
+  assert('H2: path highlighted', hl.includes('hl-cmd') && hl.includes('src/digest/strategies.ts'));
+
+  // H3: Backtick code highlighted
+  hl = highlight('Use `resolveUrls()` here');
+  assert('H3: backtick highlighted', hl.includes('hl-cmd') && hl.includes('resolveUrls()'));
+
+  // H4: **bold** rendered
+  hl = highlight('**Root Cause:** problem');
+  assert('H4: bold rendered', hl.includes('<strong>') && hl.includes('Root Cause:'));
+
+  // H5: Bold doesn't corrupt HTML (path regex must not match </strong>)
+  assert('H5: no HTML corruption', !hl.includes('hl-cmd\\">/strong') && !hl.includes('hl-cmd\">/strong'));
+
+  // H6: List numbers highlighted
+  hl = highlight('  1. First item');
+  assert('H6: number highlighted', hl.includes('hl-num') && hl.includes('1.'));
+
+  // H7: Dash list items highlighted
+  hl = highlight('  - list item');
+  assert('H7: dash highlighted', hl.includes('hl-num') && hl.includes('-'));
+
+  // H8: All list numbers highlighted equally (2., 3.)
+  hl = highlight('  2. Second item');
+  assert('H8: number 2 highlighted', hl.includes('hl-num'));
+  hl = highlight('  3. Third item');
+  assert('H8b: number 3 highlighted', hl.includes('hl-num'));
+
+  // ── Render Tests ──────────────────────────────────────────
+
+  // R1: Continuation lines in cont-none have no extra indent
+  const prevLabel = aiLabel;
+  aiLabel = 'codex'; // codex uses cont-none
+  const ed = document.getElementById('editor');
+  const prevVal = ed.value;
+  ed.value = '\u25CF Line one\n  - item a\n  - item b';
+  ed.dispatchEvent(new Event('input'));
+  const contSpans = document.querySelectorAll('.ai-line');
+  const paddings = [...contSpans].map(el => getComputedStyle(el).paddingLeft);
+  assert('R1: cont-none no padding', paddings.every(p => p === '0px'), `paddings: ${paddings}`);
+
+  // R2: No continuation class used in cont-none mode
+  const contClassSpans = document.querySelectorAll('.turn-ai.cont-none .continuation');
+  assert('R2: no .continuation in cont-none', contClassSpans.length === 0, `found ${contClassSpans.length}`);
+
+  // R3: Numbered items all at same indent
+  ed.value = '\u25CF Choose:\n\n  1. First\n  2. Second\n  3. Third';
+  ed.dispatchEvent(new Event('input'));
+  const aiLines = document.querySelectorAll('.turn-ai .ai-line');
+  const lefts = [...aiLines].map(el => el.getBoundingClientRect().left);
+  const allSame = lefts.length >= 2 && lefts.every(l => l === lefts[0]);
+  assert('R3: numbered items same indent', allSame, `lefts: ${lefts}`);
+
+  // R4: Number highlights have accent color applied
+  const hlNums = document.querySelectorAll('.hl-num');
+  assert('R4: numbers highlighted in DOM', hlNums.length >= 3, `found ${hlNums.length}`);
+
+  // Restore
+  aiLabel = prevLabel;
+  ed.value = prevVal;
+  ed.dispatchEvent(new Event('input'));
+
+  // ── Summary ───────────────────────────────────────────────
+  const passed = results.filter(r => r.pass).length;
+  const failed = results.filter(r => !r.pass).length;
+  console.log(`\n%c dumbot tests: ${passed} passed, ${failed} failed `, failed ? 'background:#dc2626;color:white;font-weight:bold' : 'background:#16a34a;color:white;font-weight:bold');
+  results.forEach(r => console.log(`  ${r.pass ? '✓' : '✗'} ${r.name}${r.detail ? ' — ' + r.detail : ''}`));
+  return { passed, failed, results };
+}};
 </script>
 </body>
 </html>
