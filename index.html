@@ -932,12 +932,27 @@ function render() {
       t.lines.forEach((l,j) => {
         if (!l && j > 0) { h += '<div class="ai-para-gap"></div>'; return; }
         const text = j === 0 && hasBullet ? l.replace(BULLET_RE, '') : l;
+        // Convert leading whitespace to CSS indent so wrapped lines stay aligned
+        const indentMatch = text.match(/^(\s+)/);
+        const indentCount = indentMatch ? indentMatch[1].length : 0;
+        const stripped = indentCount > 0 ? text.slice(indentCount) : text;
+        // Detect list prefix (e.g. "1. ", "- ") for hanging indent
+        const listMatch = stripped.match(/^(\d+\.\s|[-–]\s)/);
+        const hangLen = listMatch ? listMatch[1].length : 0;
+        let indentStyle = '';
+        if (indentCount > 0 || hangLen > 0) {
+          const pad = indentCount + hangLen;
+          const ti = hangLen > 0 ? `-${hangLen}ch` : '0';
+          indentStyle = ` style="padding-left:${pad}ch;text-indent:${ti}"`;
+        }
         if (j === 0) {
-          h += `<span>${highlight(text)}</span>`;
+          // Use ai-line (block) when indent style needs text-indent to work
+          const cls0 = indentStyle ? ' class="ai-line"' : '';
+          h += `<span${cls0}${indentStyle}>${highlight(stripped)}</span>`;
         } else if (useCont) {
-          h += `<span class="continuation">${highlight(text)}</span>`;
+          h += `<span class="continuation"${indentStyle}>${highlight(stripped)}</span>`;
         } else {
-          h += `<span class="ai-line">${highlight(text)}</span>`;
+          h += `<span class="ai-line"${indentStyle}>${highlight(stripped)}</span>`;
         }
       });
       h += '</div>';
@@ -1150,12 +1165,12 @@ window.dumbot = { runTests() {
 
   // ── Render Tests ──────────────────────────────────────────
 
-  // R1: Continuation lines in cont-none have no extra indent
+  // R1: Non-indented continuation lines in cont-none have no extra indent
   const prevLabel = aiLabel;
   aiLabel = 'codex'; // codex uses cont-none
   const ed = document.getElementById('editor');
   const prevVal = ed.value;
-  ed.value = '\u25CF Line one\n  - item a\n  - item b';
+  ed.value = '\u25CF Line one\nplain line a\nplain line b';
   ed.dispatchEvent(new Event('input'));
   const contSpans = document.querySelectorAll('.ai-line');
   const paddings = [...contSpans].map(el => getComputedStyle(el).paddingLeft);
@@ -1176,6 +1191,34 @@ window.dumbot = { runTests() {
   // R4: Number highlights have accent color applied
   const hlNums = document.querySelectorAll('.hl-num');
   assert('R4: numbers highlighted in DOM', hlNums.length >= 3, `found ${hlNums.length}`);
+
+  // R5: Indented list items get CSS padding-left (not whitespace-based indent)
+  ed.value = '\u25CF Choose:\n\n  1. First\n  2. Second';
+  ed.dispatchEvent(new Event('input'));
+  const indentedLines = document.querySelectorAll('.turn-ai .ai-line');
+  const pads = [...indentedLines].map(el => el.style.paddingLeft);
+  assert('R5: list items have CSS padding', pads.every(p => p && p !== '0ch'), `pads: ${pads}`);
+
+  // R6: List items get negative text-indent for hanging indent
+  const tis = [...indentedLines].map(el => el.style.textIndent);
+  assert('R6: list items have hanging indent', tis.every(ti => ti && ti.startsWith('-')), `text-indents: ${tis}`);
+
+  // R7: Wrapped list item text stays indented (not at column 0)
+  ed.value = 'Long intro line\n  2. Interrupt / wake the agent immediately when possible (recommended)\n  3. Short';
+  ed.dispatchEvent(new Event('input'));
+  const wrapLines = document.querySelectorAll('.turn-ai .ai-line');
+  if (wrapLines.length >= 2) {
+    const firstLeft = wrapLines[0].getBoundingClientRect().left;
+    const secondLeft = wrapLines[1].getBoundingClientRect().left;
+    assert('R7: wrapped items same indent', firstLeft === secondLeft, `left0=${firstLeft} left1=${secondLeft}`);
+  }
+
+  // R8: Non-indented lines get no padding
+  ed.value = '\u25CF Hello\nplain text no indent';
+  ed.dispatchEvent(new Event('input'));
+  const plainLines = document.querySelectorAll('.turn-ai .ai-line');
+  const plainPads = [...plainLines].map(el => el.style.paddingLeft);
+  assert('R8: plain lines no padding', plainPads.every(p => !p || p === '0ch' || p === ''), `pads: ${plainPads}`);
 
   // Restore
   aiLabel = prevLabel;
