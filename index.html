@@ -230,6 +230,20 @@ body {
 .resize-handle.right { right: calc(var(--terminal-padding) / 2 - 3px); }
 .export-frame:not(.has-bg) .resize-handle { display: none; }
 
+/* Watermark */
+.watermark {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  user-select: none;
+  pointer-events: none;
+}
+.export-frame:not(.has-bg) .watermark { display: none; }
+
 /* Drag */
 .turn[draggable="true"] { position: relative; }
 .turn.dragging { opacity: 0.25; }
@@ -467,6 +481,7 @@ body {
           </div>
           <div class="resize-handle left" id="resL"></div>
           <div class="resize-handle right" id="resR"></div>
+          <div class="watermark" id="watermark">dumbot</div>
         </div>
       </div>
     </div>
@@ -702,6 +717,30 @@ let theme = 'sunset';
 let aiLabel = 'claude';
 let isDark = true;
 
+function updateWatermark() {
+  const wm = $('watermark');
+  const pad = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--terminal-padding'));
+  const hasBg = $('bgToggle').checked;
+  if (!hasBg) { wm.style.display = 'none'; return; }
+  wm.style.display = '';
+  wm.style.color = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.35)';
+  wm.style.textShadow = isDark ? '0 1px 3px rgba(0,0,0,0.3)' : '0 1px 3px rgba(255,255,255,0.3)';
+  // Scale position and size for small paddings
+  if (pad <= 16) {
+    wm.style.fontSize = '9px';
+    wm.style.bottom = '2px';
+    wm.style.right = '6px';
+  } else if (pad <= 32) {
+    wm.style.fontSize = '10px';
+    wm.style.bottom = '6px';
+    wm.style.right = '10px';
+  } else {
+    wm.style.fontSize = '';
+    wm.style.bottom = '';
+    wm.style.right = '';
+  }
+}
+
 // ─── Apply Theme ─────────────────────────────────────────────
 function applyTheme() {
   const t = THEMES[theme];
@@ -727,6 +766,9 @@ function applyTheme() {
   body.style.textShadow = c.textShadow || 'none';
   title.style.color = c.title;
   dots.forEach(d => d.style.background = c.dots);
+
+  // Watermark
+  updateWatermark();
 
   // Scanlines
   term.classList.toggle('crt-scanlines', !!(c.scanlines && isDark));
@@ -1032,6 +1074,7 @@ $('padBtns').querySelectorAll('button').forEach(b => {
     $('padBtns').querySelectorAll('button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     document.documentElement.style.setProperty('--terminal-padding', b.dataset.v + 'px');
+    updateWatermark();
   });
 });
 
